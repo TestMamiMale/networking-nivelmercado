@@ -27,9 +27,16 @@ Auth y RLS).
    supabase db push
    ```
 
-   O pega el contenido de `supabase/migrations/0001_init.sql` en el SQL Editor.
+   O pega en el SQL Editor, **en este orden**, el contenido de:
 
-4. Arranca el servidor de desarrollo:
+   1. `supabase/migrations/0001_init.sql` (tablas, funciones y RLS).
+   2. `supabase/migrations/0002_invitations.sql` (acceso por invitación y
+      `profiles` solo para usuarios autenticados).
+
+4. Invita a la gente que va a asistir (ver
+   [Invitaciones](#invitaciones-acceso-por-invitación)).
+
+5. Arranca el servidor de desarrollo:
 
    ```bash
    npm run dev
@@ -37,16 +44,89 @@ Auth y RLS).
 
 ## Flujo de uso
 
-1. **Registro** en `/login` → Supabase envía el correo de confirmación y el
-   enlace vuelve por `/auth/callback` (intercambio PKCE).
-2. **Dashboard** (`/dashboard`, protegido por `src/proxy.ts`): edita tu perfil
-   público, publica huecos con el calendario y consulta tus huecos y reuniones.
-3. **Directorio** (`/directorio`): perfiles públicos con buscador y filtro por
-   tipo (`indie` / `publisher`).
-4. **Perfil** (`/perfil/[slug]`): ficha pública + calendario para reservar un hueco
+1. **Registro** en `/login` → solo con un correo invitado (ver
+   [Invitaciones](#invitaciones-acceso-por-invitación)); Supabase envía el correo
+   de confirmación y el enlace vuelve por `/auth/callback` (intercambio PKCE).
+2. **Dashboard** (`/dashboard`): edita tu perfil público, publica huecos con el
+   calendario y consulta tus huecos y reuniones. El proxy exige sesión en todas
+   las rutas de la app.
+3. **Directorio** (`/directorio`): perfiles de los asistentes con buscador y
+   filtro por tipo (`indie` / `publisher`). Requiere sesión: RLS no expone
+   `profiles` a la clave anónima.
+4. **Perfil** (`/perfil/[slug]`): ficha + calendario para reservar un hueco
    libre. Al confirmar la reserva se puede entrar directamente a la
    videollamada integrada (JaaS); en el dashboard, cada reunión tiene su propio
    botón **Entrar a la videollamada**.
+
+## Invitaciones (acceso por invitación)
+
+La app es cerrada: el proxy exige sesión en **todas** las rutas salvo `/login`,
+`/auth/*` y `/api/*`, y RLS solo deja leer `profiles` a usuarios autenticados.
+Para entrar hay que estar en la tabla `public.invitations`.
+
+### Dar de alta invitados
+
+Desde el SQL Editor (la tabla no es accesible desde el cliente: RLS está activo
+y sin políticas):
+
+```sql
+insert into public.invitations (email) values
+  ('ana@estudio.cl'),
+  ('bruno@publisher.com')
+on conflict (email) do nothing;
+```
+
+- `email` se normaliza solo (trim + minúsculas) y es único.
+- `code` se genera automáticamente (`NG-1A2B3C4D`) por si repartes enlaces.
+- `is_used` pasa a `true` y `used_at` se rellena cuando la persona crea su
+  cuenta.
+
+### Cómo funciona el registro
+
+1. El formulario de `/login` llama a `POST /api/invitations/verify` **antes** de
+   `auth.signUp()`. Si el correo no está invitado o ya se usó, muestra el error
+   y no crea nada.
+2. El endpoint usa `public.check_invitation(email)` (`SECURITY DEFINER`), que
+   solo responde por *ese* correo: no permite listar invitados.
+3. Al insertarse la fila en `auth.users`, el trigger
+   `on_auth_user_invitation_used` marca la invitación como usada en la misma
+   transacción (si el alta falla, la invitación sigue disponible).
+
+### Consultar y reutilizar
+
+```sql
+-- Estado de las invitaciones
+select email, code, is_used, used_at
+from public.invitations
+order by is_used, email;
+
+-- Volver a habilitar un correo (por ejemplo, si se escribió mal)
+update public.invitations
+   set is_used = false, used_at = null
+ where email = 'ana@estudio.cl';
+```
+
+> **Bloqueo estricto (opcional).** El formulario da el mensaje amable, pero un
+> `signUp` lanzado a mano desde la consola del navegador seguiría creando la
+> cuenta: el trigger solo *marca* la invitación. Para que la base de datos
+> rechace cualquier alta sin invitación, añade al principio del cuerpo de
+> `public.mark_invitation_used()`:
+>
+> ```sql
+> if not exists (
+>   select 1 from public.invitations
+>   where email = lower(trim(new.email)) and is_used = false
+> ) then
+>   raise exception 'invitation_required' using errcode = '42501';
+> end if;
+> ```
+>
+> Ojo: con eso también fallan los usuarios creados a mano desde el panel de
+> Supabase; invítalos antes.
+
+`POST /api/invitations/verify` no limita intentos (es un `POST` sin estado). Si
+te preocupa que alguien deduzca qué correos están invitados, mete rate limiting
+en el proxy o en el edge de tu hosting.
 
 ## API
 
@@ -58,6 +138,7 @@ Auth y RLS).
 | `GET /api/meetings` | Reuniones del usuario con el nombre del otro participante. |
 | `POST /api/meetings` | Reserva un hueco (`{ availability_id }`) llamando a la función `book_availability`. |
 | `POST /api/jitsi-token` | Firma un JWT de JaaS (`{ roomName, userName? }`) para entrar en la sala de una reunión propia. |
+| `POST /api/invitations/verify` | Comprueba si un correo está invitado (`{ email }`): `200 { allowed: true }`, `403` con `reason: "not_found" \| "already_used"`. No modifica nada. |
 | `GET /auth/callback` | Intercambia el código PKCE por una sesión. |
 
 ## Videollamadas (JaaS)
@@ -114,11 +195,19 @@ servidor.
   `SECURITY DEFINER` que marca el hueco con un `UPDATE ... WHERE is_booked =
   false AND start_time > now() RETURNING *`. Si dos personas reservan a la vez,
   la segunda recibe `slot_unavailable` (HTTP 409).
-- **RLS activado** en `profiles`, `availability` y `meetings`: lectura pública de
-  perfiles/huecos libres y escritura limitada al dueño.
+- **Acceso cerrado desde el proxy**: `src/proxy.ts` (el "middleware" de Next 16
+  se llama `proxy.ts` y exporta `proxy`) refresca la sesión y redirige a
+  `/login?redirectedFrom=…` cualquier ruta sin sesión. Quedan abiertas `/login`,
+  `/auth/*` y `/api/*` (los Route Handlers responden su propio 401 en JSON).
+- **RLS**: `profiles` solo es legible por `authenticated` (política
+  `profiles_authenticated_read`); `availability` mantiene lectura pública;
+  `meetings`, solo sus participantes. `invitations` tiene RLS activo **sin
+  políticas**, así que solo se consulta a través de `check_invitation()`.
 - **Tres clientes de Supabase**: navegador (`src/lib/supabase.ts`, singleton
   perezoso), servidor con cookies (`src/lib/supabase/server.ts`) y público sin
-  cookies (`src/lib/supabase/public.ts`) para páginas prerenderizables.
+  cookies (`src/lib/supabase/public.ts`). El directorio y los perfiles usan el
+  de cookies; el público queda para lo que no necesita sesión (por ejemplo los
+  huecos libres de `/api/availability`).
 - **JWT de JaaS solo en el servidor**: `src/lib/jitsi-secret.ts` obtiene la clave
   (`JITSI_APP_SECRET` o `./private.key` con `fs.readFileSync`) y
   `src/lib/jitsi-token.ts` firma con `jsonwebtoken`; el navegador únicamente
@@ -147,6 +236,15 @@ servidor.
 
 El token caduca a las 2 horas y se vuelve a pedir al pulsar de nuevo **Entrar a
 la videollamada**.
+
+### El registro rechaza a alguien que sí está invitado
+
+| Síntoma | Causa y solución |
+| --- | --- |
+| `Este correo no está en la lista de invitados` | No hay fila en `public.invitations` para ese correo. Añádela (el `email` se guarda en minúsculas y sin espacios). |
+| `Esta invitación ya fue utilizada` | `is_used = true`. Si la cuenta existe, que inicie sesión; si no, pon `is_used = false` y `used_at = null` antes de reintentar. |
+| `Could not find the function public.check_invitation(p_email)` (500) | Falta aplicar `supabase/migrations/0002_invitations.sql` en el proyecto de Supabase. |
+| El directorio o un perfil salen vacíos (o `permission denied for table profiles`) | Ese proyecto aún tiene la política pública de `0001_init.sql`. Aplica `0002_invitations.sql` y comprueba que la sesión está activa. |
 
 ### `ERROR: 42703: column "participant1_id" does not exist` al aplicar `0001_init.sql`
 

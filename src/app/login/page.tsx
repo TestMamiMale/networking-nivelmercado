@@ -4,7 +4,7 @@
 import { Suspense, useState } from "react";
 import { createClient } from "@/lib/supabase";
 import { useRouter, useSearchParams } from "next/navigation";
-import type { ProfileType } from "@/types";
+import type { InvitationVerifyResponse, ProfileType } from "@/types";
 
 export default function LoginPage() {
   return (
@@ -20,6 +20,7 @@ function LoginForm() {
   const [name, setName] = useState("");
   const [profileType, setProfileType] = useState<ProfileType>("indie");
   const [isRegistering, setIsRegistering] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const router = useRouter();
@@ -28,48 +29,105 @@ function LoginForm() {
   // Error devuelto por /auth/callback (por ejemplo, un enlace caducado).
   const callbackError = searchParams.get("error");
 
+  /**
+   * Pregunta al servidor si el correo está invitado. Devuelve el mensaje de
+   * error a mostrar, o `null` si puede continuar.
+   *
+   * La tabla `invitations` no es legible desde el navegador (RLS sin
+   * políticas): la comprobación pasa por /api/invitations/verify.
+   */
+  const verifyInvitation = async (): Promise<string | null> => {
+    let response: Response;
+
+    try {
+      response = await fetch("/api/invitations/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+    } catch {
+      return "No pudimos conectar con el servidor. Revisa tu conexión e inténtalo de nuevo.";
+    }
+
+    const result = (await response.json().catch(() => null)) as
+      | InvitationVerifyResponse
+      | null;
+
+    if (!response.ok || !result?.allowed) {
+      return (
+        result?.error ??
+        "No pudimos verificar tu invitación. Inténtalo de nuevo en unos segundos."
+      );
+    }
+
+    return null;
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setMessage(null);
 
-    if (isRegistering) {
-      if (!name.trim()) {
-        setError("Indica tu nombre o el de tu estudio.");
-        return;
-      }
+    if (isSubmitting) return;
 
-      const { error } = await createClient().auth.signUp({
-        email,
-        password,
-        options: {
-          emailRedirectTo: `${window.location.origin}/auth/callback`,
-          // El trigger handle_new_user crea el perfil con estos metadatos.
-          data: { name: name.trim(), type: profileType },
-        },
-      });
-      if (error) {
-        setError(error.message);
-      } else {
-        setMessage("Registro exitoso. Por favor, revisa tu correo para confirmar.");
-      }
-    } else {
-      const { error } = await createClient().auth.signInWithPassword({
-        email,
-        password,
-      });
-      if (error) {
-        setError(error.message);
-      } else {
-        const redirectedFrom = searchParams.get("redirectedFrom");
-        const destination =
-          redirectedFrom && redirectedFrom.startsWith("/")
-            ? redirectedFrom
-            : "/dashboard";
+    setIsSubmitting(true);
 
-        router.push(destination);
-        router.refresh();
+    try {
+      if (isRegistering) {
+        if (!name.trim()) {
+          setError("Indica tu nombre o el de tu estudio.");
+          return;
+        }
+
+        // 1) Solo los correos invitados pueden registrarse.
+        const invitationError = await verifyInvitation();
+
+        if (invitationError) {
+          setError(invitationError);
+          return;
+        }
+
+        // 2) Alta en Supabase Auth. El trigger de la base de datos marca la
+        //    invitación como usada y crea el perfil.
+        const { error } = await createClient().auth.signUp({
+          email: email.trim().toLowerCase(),
+          password,
+          options: {
+            emailRedirectTo: `${window.location.origin}/auth/callback`,
+            // El trigger handle_new_user crea el perfil con estos metadatos.
+            data: { name: name.trim(), type: profileType },
+          },
+        });
+        if (error) {
+          setError(error.message);
+        } else {
+          setMessage(
+            "Registro exitoso. Revisa tu correo para confirmar tu cuenta.",
+          );
+        }
+      } else {
+        const { error } = await createClient().auth.signInWithPassword({
+          email,
+          password,
+        });
+        if (error) {
+          setError(error.message);
+        } else {
+          const redirectedFrom = searchParams.get("redirectedFrom");
+          // Solo rutas internas: `//dominio.com` sería un open redirect.
+          const destination =
+            redirectedFrom &&
+            redirectedFrom.startsWith("/") &&
+            !redirectedFrom.startsWith("//")
+              ? redirectedFrom
+              : "/dashboard";
+
+          router.push(destination);
+          router.refresh();
+        }
       }
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -79,6 +137,12 @@ function LoginForm() {
         <h2 className="mt-6 text-center text-3xl font-bold leading-9 tracking-tight text-zinc-950 dark:text-zinc-50">
           {isRegistering ? "Regístrate" : "Inicia sesión"}
         </h2>
+        {isRegistering && (
+          <p className="mt-3 text-center text-sm text-zinc-600 dark:text-zinc-400">
+            El acceso es por invitación: usa el correo con el que te invitaron
+            al evento.
+          </p>
+        )}
       </div>
 
       <div className="mt-10 sm:mx-auto sm:w-full sm:max-w-md">
@@ -178,9 +242,14 @@ function LoginForm() {
           <div>
             <button
               type="submit"
-              className="flex w-full justify-center rounded-md bg-blue-600 px-3 py-1.5 text-sm font-semibold leading-6 text-white shadow-sm hover:bg-blue-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 dark:bg-blue-500 dark:hover:bg-blue-400"
+              disabled={isSubmitting}
+              className="flex w-full justify-center rounded-md bg-blue-600 px-3 py-1.5 text-sm font-semibold leading-6 text-white shadow-sm hover:bg-blue-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-blue-500 dark:hover:bg-blue-400"
             >
-              {isRegistering ? "Registrarme" : "Iniciar sesión"}
+              {isSubmitting
+                ? "Un momento…"
+                : isRegistering
+                  ? "Registrarme"
+                  : "Iniciar sesión"}
             </button>
           </div>
         </form>

@@ -3,7 +3,7 @@ import Image from "next/image";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
 import BookingSection from "@/components/BookingSection";
-import { createPublicSupabaseClient } from "@/lib/supabase/public";
+import { createServerSupabaseClient } from "@/lib/supabase/server";
 import type { Profile, SocialLink } from "@/types";
 
 const UUID_RE =
@@ -41,7 +41,9 @@ async function ProfileContent({ params }: PageProps) {
   let failure = false;
 
   try {
-    const supabase = createPublicSupabaseClient();
+    // Requiere sesión: la política `profiles_authenticated_read` no deja leer
+    // perfiles con la clave anónima.
+    const supabase = await createServerSupabaseClient();
 
     const { data, error } = await supabase
       .from("profiles")

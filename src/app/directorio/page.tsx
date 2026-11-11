@@ -1,12 +1,16 @@
 import { Suspense } from "react";
 import { connection } from "next/server";
 import DirectoryFilters from "@/components/DirectoryFilters";
-import { createPublicSupabaseClient } from "@/lib/supabase/public";
+import { createServerSupabaseClient } from "@/lib/supabase/server";
 import type { Profile } from "@/types";
 
 /**
- * Directorio público. La consulta a Supabase es datos no cacheados, así que con
- * `cacheComponents` debe vivir detrás de un <Suspense>.
+ * Directorio del evento. Requiere sesión: el proxy redirige a /login y, desde
+ * 0002_invitations.sql, RLS solo deja leer `profiles` a usuarios autenticados,
+ * así que la consulta usa el cliente con cookies (no el anónimo).
+ *
+ * La consulta a Supabase es dato de runtime, así que con `cacheComponents`
+ * debe vivir detrás de un <Suspense>.
  */
 export default function DirectoryPage() {
   return (
@@ -32,7 +36,7 @@ async function DirectoryContent() {
   let failure: "query" | "config" | null = null;
 
   try {
-    const supabase = createPublicSupabaseClient();
+    const supabase = await createServerSupabaseClient();
 
     const { data, error } = await supabase
       .from("profiles")

@@ -57,3 +57,25 @@ export interface JitsiTokenResponse {
   /** `true` si el usuario es el dueño del hueco reservado. */
   moderator: boolean;
 }
+
+/**
+ * Fila de `public.invitations`. Solo se gestiona desde el SQL Editor: RLS no
+ * expone la tabla a los clientes.
+ */
+export interface Invitation {
+  id: string;
+  email: string;
+  code: string;
+  is_used: boolean;
+  created_at: string;
+  used_at: string | null;
+}
+
+/** Respuesta de `POST /api/invitations/verify`. */
+export interface InvitationVerifyResponse {
+  allowed: boolean;
+  /** Motivo del rechazo (para mostrar un mensaje distinto en /login). */
+  reason?: "invalid_email" | "not_found" | "already_used";
+  error?: string;
+}
+

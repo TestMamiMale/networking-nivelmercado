@@ -4,10 +4,31 @@ import { getSupabaseEnv } from "@/lib/supabase/env";
 
 /**
  * Proxy (antes "middleware"): refresca la sesión de Supabase en cada petición
- * para que los tokens no caduquen en silencio, y protege las rutas privadas.
+ * para que los tokens no caduquen en silencio y exige sesión en todas las
+ * rutas de la app.
  *
- * En Next 16 el archivo se llama `proxy.ts` y debe exportar `proxy`.
+ * En Next 16 el archivo se llama `proxy.ts` y debe exportar `proxy`
+ * (https://nextjs.org/docs/app/api-reference/file-conventions/proxy).
+ *
+ * Rutas públicas (sin sesión):
+ *   - `/login`        → formulario de acceso / registro.
+ *   - `/auth/*`       → callback de confirmación de correo y recuperación.
+ *   - `/api/*`        → los Route Handlers responden JSON con su propio 401
+ *                       (redirigir un fetch a /login devolvería HTML).
+ * Todo lo demás (`/`, `/dashboard`, `/directorio`, `/perfil/[slug]`, ...)
+ * redirige a /login conservando el destino en `?redirectedFrom=`.
  */
+
+const PUBLIC_PATHS = new Set(["/login"]);
+
+function isPublicPath(pathname: string) {
+  if (PUBLIC_PATHS.has(pathname)) return true;
+  if (pathname === "/api" || pathname.startsWith("/api/")) return true;
+  if (pathname.startsWith("/auth/")) return true;
+
+  return false;
+}
+
 export async function proxy(request: NextRequest) {
   let response = NextResponse.next({ request });
 
@@ -45,7 +66,7 @@ export async function proxy(request: NextRequest) {
 
   const { pathname } = request.nextUrl;
 
-  if (!user && pathname.startsWith("/dashboard")) {
+  if (!user && !isPublicPath(pathname)) {
     const loginUrl = request.nextUrl.clone();
     loginUrl.pathname = "/login";
     loginUrl.search = "";
