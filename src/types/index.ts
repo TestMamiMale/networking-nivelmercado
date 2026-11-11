@@ -58,24 +58,52 @@ export interface JitsiTokenResponse {
   moderator: boolean;
 }
 
-/**
- * Fila de `public.invitations`. Solo se gestiona desde el SQL Editor: RLS no
- * expone la tabla a los clientes.
- */
-export interface Invitation {
+export interface AccessCode {
   id: string;
-  email: string;
   code: string;
+  /** Anotación del organizador (empresa/persona). No se usa para validar. */
+  assigned_to: string | null;
   is_used: boolean;
   created_at: string;
   used_at: string | null;
 }
 
-/** Respuesta de `POST /api/invitations/verify`. */
-export interface InvitationVerifyResponse {
-  allowed: boolean;
-  /** Motivo del rechazo (para mostrar un mensaje distinto en /login). */
-  reason?: "invalid_email" | "not_found" | "already_used";
+/** Cuerpo de `POST /api/auth/register-with-code`. */
+export interface RegisterWithCodePayload {
+  name: string;
+  email: string;
+  password: string;
+  type: ProfileType;
+  code: string;
+}
+
+/** Sesión que devuelve `POST /api/auth/register-with-code`. */
+export interface AuthSessionPayload {
+  access_token: string;
+  refresh_token: string;
+  expires_at: number;
+  expires_in: number;
+  token_type: string;
+}
+
+/** Respuesta de `POST /api/auth/register-with-code`. */
+export interface RegisterWithCodeResponse {
+  user?: {
+    id: string;
+    email: string;
+    name: string;
+    type: ProfileType;
+  };
+  /** `null` si la cuenta se creó pero no se pudo iniciar sesión. */
+  session?: AuthSessionPayload | null;
   error?: string;
+  /** Motivo del rechazo, para que /login muestre el mensaje adecuado. */
+  reason?:
+    | "invalid_input"
+    | "invalid_code"
+    | "code_used"
+    | "email_taken"
+    | "unavailable"
+    | "server_error";
 }
 

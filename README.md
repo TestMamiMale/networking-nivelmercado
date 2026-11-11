@@ -13,7 +13,9 @@ Auth y RLS).
    ```
 
 2. Crea el fichero de entorno y rellena los valores de tu proyecto de Supabase
-   (Settings → API) y, si vas a usar videollamadas, los de JaaS (ver
+   (Settings → API): la URL, la clave `anon` y la **`service_role`** (esta última
+   es secreta: solo se usa en el servidor, para el registro con código). Si vas a
+   usar videollamadas, añade también los de JaaS (ver
    [Videollamadas (JaaS)](#videollamadas-jaas)):
 
    ```bash
@@ -30,11 +32,13 @@ Auth y RLS).
    O pega en el SQL Editor, **en este orden**, el contenido de:
 
    1. `supabase/migrations/0001_init.sql` (tablas, funciones y RLS).
-   2. `supabase/migrations/0002_invitations.sql` (acceso por invitación y
-      `profiles` solo para usuarios autenticados).
+   2. `supabase/migrations/0002_invitations.sql` (`profiles` solo para usuarios
+      autenticados y el primer flujo de invitaciones).
+   3. `supabase/migrations/0003_access_codes.sql` (tabla `access_codes`; retira
+      las invitaciones por correo).
 
-4. Invita a la gente que va a asistir (ver
-   [Invitaciones](#invitaciones-acceso-por-invitación)).
+4. Genera los códigos de invitación y repártelos (ver
+   [Códigos de acceso](#códigos-de-acceso-registro-cerrado)).
 
 5. Arranca el servidor de desarrollo:
 
@@ -44,9 +48,10 @@ Auth y RLS).
 
 ## Flujo de uso
 
-1. **Registro** en `/login` → solo con un correo invitado (ver
-   [Invitaciones](#invitaciones-acceso-por-invitación)); Supabase envía el correo
-   de confirmación y el enlace vuelve por `/auth/callback` (intercambio PKCE).
+1. **Registro** en `/login` con **nombre, email, contraseña, tipo y código de
+   invitación** (ver
+   [Códigos de acceso](#códigos-de-acceso-registro-cerrado)). La cuenta se crea
+   ya confirmada, sin correo de verificación, y la sesión queda iniciada.
 2. **Dashboard** (`/dashboard`): edita tu perfil público, publica huecos con el
    calendario y consulta tus huecos y reuniones. El proxy exige sesión en todas
    las rutas de la app.
@@ -58,75 +63,100 @@ Auth y RLS).
    videollamada integrada (JaaS); en el dashboard, cada reunión tiene su propio
    botón **Entrar a la videollamada**.
 
-## Invitaciones (acceso por invitación)
+## Códigos de acceso (registro cerrado)
 
 La app es cerrada: el proxy exige sesión en **todas** las rutas salvo `/login`,
 `/auth/*` y `/api/*`, y RLS solo deja leer `profiles` a usuarios autenticados.
-Para entrar hay que estar en la tabla `public.invitations`.
+Para registrarse hace falta un **código de invitación** de la tabla
+`public.access_codes`. Cada código vale para **un solo registro** y sirve con el
+correo que la persona prefiera: ya no hay una lista de emails invitados.
 
-### Dar de alta invitados
+### Generar y repartir códigos
 
 Desde el SQL Editor (la tabla no es accesible desde el cliente: RLS está activo
 y sin políticas):
 
 ```sql
-insert into public.invitations (email) values
-  ('ana@estudio.cl'),
-  ('bruno@publisher.com')
-on conflict (email) do nothing;
+-- 25 códigos de golpe, anotando a quién va cada uno
+insert into public.access_codes (assigned_to)
+select 'Estudio ' || g from generate_series(1, 25) g;
+
+-- Lista para imprimir / pegar en la hoja de cálculo del evento
+select code, assigned_to, is_used, used_at
+from public.access_codes
+order by created_at;
 ```
 
-- `email` se normaliza solo (trim + minúsculas) y es único.
-- `code` se genera automáticamente (`NG-1A2B3C4D`) por si repartes enlaces.
-- `is_used` pasa a `true` y `used_at` se rellena cuando la persona crea su
-  cuenta.
+- `code` se genera solo: `NG-XXXXXX` (`NG-` + 6 caracteres sin `0/O/1/I`, para
+  poder dictarlo por teléfono sin errores). Es único.
+- `assigned_to` es una **anotación libre** del organizador (empresa, persona,
+  mesa…). No se usa para validar: cualquier correo vale con cualquier código
+  libre.
+- Si en vez de códigos sueltos repartes enlaces, `/login?code=NG-ABC123` abre el
+  formulario de registro con el código ya rellenado.
 
 ### Cómo funciona el registro
 
-1. El formulario de `/login` llama a `POST /api/invitations/verify` **antes** de
-   `auth.signUp()`. Si el correo no está invitado o ya se usó, muestra el error
-   y no crea nada.
-2. El endpoint usa `public.check_invitation(email)` (`SECURITY DEFINER`), que
-   solo responde por *ese* correo: no permite listar invitados.
-3. Al insertarse la fila en `auth.users`, el trigger
-   `on_auth_user_invitation_used` marca la invitación como usada en la misma
-   transacción (si el alta falla, la invitación sigue disponible).
+1. El formulario de `/login` pide **nombre, email, contraseña, tipo y código** y
+   hace `POST /api/auth/register-with-code`. No hay correo de confirmación.
+2. La Route Handler (servidor) comprueba que el código exista y esté libre, y lo
+   **consume** con un único `UPDATE ... WHERE code = $1 AND is_used = false`: si
+   llegan dos peticiones con el mismo código, solo una gana.
+3. Crea la cuenta con la **Admin API** (`supabase.auth.admin.createUser` con
+   `email_confirm: true`) usando la `SUPABASE_SERVICE_ROLE_KEY`. El trigger
+   `handle_new_user` crea el perfil con los metadatos `name` y `type`.
+4. Si el alta falla (por ejemplo, porque el correo ya tiene cuenta), el código se
+   **libera** (`is_used = false`, `used_at = null`) y vuelve a estar disponible.
+5. Si el alta va bien, se inicia sesión con el cliente de cookies: la respuesta
+   incluye `{ user, session }` y el navegador queda autenticado, así que el
+   formulario navega directo al dashboard.
 
-### Consultar y reutilizar
+> La `service_role` key **omite RLS**. Vive solo en `SUPABASE_SERVICE_ROLE_KEY`
+> (sin prefijo `NEXT_PUBLIC_`), se usa únicamente en `src/lib/supabase/admin.ts`
+> y en `POST /api/auth/register-with-code`, y nunca llega al bundle del
+> navegador. No la subas al repositorio.
+
+### Cerrar el registro público (recomendado)
+
+Al retirar el trigger `on_auth_user_invitation_used` ya no queda nada en la base
+de datos que impida un `auth.signUp()` lanzado a mano con la clave `anon` desde
+la consola del navegador. Para que el **único** camino de alta sea la Admin API
+(que sí exige código):
+
+1. Supabase → **Authentication → Sign In / Providers → Email**.
+2. Desactiva **Allow new users to sign up**.
+
+`auth.admin.createUser` sigue funcionando con esa opción desactivada (el ajuste
+solo bloquea el endpoint público `/signup`), así que el registro con código no se
+ve afectado.
+
+### Consultar y reutilizar códigos
 
 ```sql
--- Estado de las invitaciones
-select email, code, is_used, used_at
-from public.invitations
-order by is_used, email;
+-- Códigos ya usados, del más reciente al más antiguo
+select code, assigned_to, used_at
+from public.access_codes
+where is_used
+order by used_at desc;
 
--- Volver a habilitar un correo (por ejemplo, si se escribió mal)
-update public.invitations
+-- Volver a habilitar uno (por ejemplo, si el registro se hizo con mal correo)
+update public.access_codes
    set is_used = false, used_at = null
- where email = 'ana@estudio.cl';
+ where code = 'NG-ABC123';
+
+-- Los que quedan sin usar, en una sola línea para copiarlos
+select string_agg(code, ' ' order by code)
+from public.access_codes
+where not is_used;
 ```
 
-> **Bloqueo estricto (opcional).** El formulario da el mensaje amable, pero un
-> `signUp` lanzado a mano desde la consola del navegador seguiría creando la
-> cuenta: el trigger solo *marca* la invitación. Para que la base de datos
-> rechace cualquier alta sin invitación, añade al principio del cuerpo de
-> `public.mark_invitation_used()`:
->
-> ```sql
-> if not exists (
->   select 1 from public.invitations
->   where email = lower(trim(new.email)) and is_used = false
-> ) then
->   raise exception 'invitation_required' using errcode = '42501';
-> end if;
-> ```
->
-> Ojo: con eso también fallan los usuarios creados a mano desde el panel de
-> Supabase; invítalos antes.
+Los códigos que ya existieran en `public.invitations` (flujo antiguo de `0002`)
+se copian a `access_codes` al aplicar `0003`, y después la tabla anterior se
+elimina.
 
-`POST /api/invitations/verify` no limita intentos (es un `POST` sin estado). Si
-te preocupa que alguien deduzca qué correos están invitados, mete rate limiting
-en el proxy o en el edge de tu hosting.
+`POST /api/auth/register-with-code` no limita intentos: con 32^6 combinaciones
+(≈ 1 000 millones) adivinar un código es inviable, pero si quieres cortar fuerza
+bruta mete rate limiting en el proxy o en el edge de tu hosting.
 
 ## API
 
@@ -138,8 +168,8 @@ en el proxy o en el edge de tu hosting.
 | `GET /api/meetings` | Reuniones del usuario con el nombre del otro participante. |
 | `POST /api/meetings` | Reserva un hueco (`{ availability_id }`) llamando a la función `book_availability`. |
 | `POST /api/jitsi-token` | Firma un JWT de JaaS (`{ roomName, userName? }`) para entrar en la sala de una reunión propia. |
-| `POST /api/invitations/verify` | Comprueba si un correo está invitado (`{ email }`): `200 { allowed: true }`, `403` con `reason: "not_found" \| "already_used"`. No modifica nada. |
-| `GET /auth/callback` | Intercambia el código PKCE por una sesión. |
+| `POST /api/auth/register-with-code` | Registro con código (`{ name, email, password, type, code }`): `201 { user, session }`, `403 reason: "invalid_code"`, `409 reason: "code_used" \| "email_taken"`, `503` si falta `SUPABASE_SERVICE_ROLE_KEY`. Consume el código de forma atómica. |
+| `GET /auth/callback` | Intercambia el código PKCE por una sesión (enlaces de Supabase Auth; el registro ya no lo usa). |
 
 ## Videollamadas (JaaS)
 
@@ -201,13 +231,15 @@ servidor.
   `/auth/*` y `/api/*` (los Route Handlers responden su propio 401 en JSON).
 - **RLS**: `profiles` solo es legible por `authenticated` (política
   `profiles_authenticated_read`); `availability` mantiene lectura pública;
-  `meetings`, solo sus participantes. `invitations` tiene RLS activo **sin
-  políticas**, así que solo se consulta a través de `check_invitation()`.
-- **Tres clientes de Supabase**: navegador (`src/lib/supabase.ts`, singleton
-  perezoso), servidor con cookies (`src/lib/supabase/server.ts`) y público sin
-  cookies (`src/lib/supabase/public.ts`). El directorio y los perfiles usan el
-  de cookies; el público queda para lo que no necesita sesión (por ejemplo los
-  huecos libres de `/api/availability`).
+  `meetings`, solo sus participantes. `access_codes` tiene RLS activo **sin
+  políticas**, con los permisos revocados a `anon` y `authenticated`: solo la
+  toca el servidor con la service role key.
+- **Cuatro clientes de Supabase**: navegador (`src/lib/supabase.ts`, singleton
+  perezoso), servidor con cookies (`src/lib/supabase/server.ts`), público sin
+  cookies (`src/lib/supabase/public.ts`) y admin con la service role key
+  (`src/lib/supabase/admin.ts`, solo para crear usuarios y consumir códigos). El
+  directorio y los perfiles usan el de cookies; el público queda para lo que no
+  necesita sesión (por ejemplo los huecos libres de `/api/availability`).
 - **JWT de JaaS solo en el servidor**: `src/lib/jitsi-secret.ts` obtiene la clave
   (`JITSI_APP_SECRET` o `./private.key` con `fs.readFileSync`) y
   `src/lib/jitsi-token.ts` firma con `jsonwebtoken`; el navegador únicamente
@@ -237,13 +269,16 @@ servidor.
 El token caduca a las 2 horas y se vuelve a pedir al pulsar de nuevo **Entrar a
 la videollamada**.
 
-### El registro rechaza a alguien que sí está invitado
+### El registro con código falla
 
 | Síntoma | Causa y solución |
 | --- | --- |
-| `Este correo no está en la lista de invitados` | No hay fila en `public.invitations` para ese correo. Añádela (el `email` se guarda en minúsculas y sin espacios). |
-| `Esta invitación ya fue utilizada` | `is_used = true`. Si la cuenta existe, que inicie sesión; si no, pon `is_used = false` y `used_at = null` antes de reintentar. |
-| `Could not find the function public.check_invitation(p_email)` (500) | Falta aplicar `supabase/migrations/0002_invitations.sql` en el proyecto de Supabase. |
+| `Ese código no existe` | El código no está en `public.access_codes`. Revisa mayúsculas y guiones (`NG-ABC123`); el formulario las fuerza, pero un `curl` no. |
+| `Ese código ya fue utilizado` | `is_used = true`. Mira `used_at`; si fue un error, pon `is_used = false, used_at = null` y vuelve a probar. |
+| `Ese correo ya tiene una cuenta` | El email ya está registrado: que inicie sesión. El código se libera automáticamente, así que puedes usarlo con otro correo. |
+| `El registro no está disponible ahora mismo` (503) | Falta `SUPABASE_SERVICE_ROLE_KEY` en `.env.local`. Si la acabas de añadir, reinicia `npm run dev` (las variables solo se leen al arrancar). |
+| `No pudimos validar tu código` (500) | Falta aplicar `supabase/migrations/0003_access_codes.sql`, o la tabla no conserva el `grant` para `service_role` (el bloque final de la migración lo repone). |
+| `permission denied for table access_codes` | La clave usada no es la `service_role`: revisa que `SUPABASE_SERVICE_ROLE_KEY` sea la de Settings → API y no la `anon`. |
 | El directorio o un perfil salen vacíos (o `permission denied for table profiles`) | Ese proyecto aún tiene la política pública de `0001_init.sql`. Aplica `0002_invitations.sql` y comprueba que la sesión está activa. |
 
 ### `ERROR: 42703: column "participant1_id" does not exist` al aplicar `0001_init.sql`
