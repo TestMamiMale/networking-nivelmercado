@@ -36,6 +36,8 @@ Auth y RLS).
       autenticados y el primer flujo de invitaciones).
    3. `supabase/migrations/0003_access_codes.sql` (tabla `access_codes`; retira
       las invitaciones por correo).
+   4. `supabase/migrations/0004_meeting_limit.sql` (límite de 3 reuniones por
+      persona dentro de `book_availability`, con candado de transacción).
 
 4. Genera los códigos de invitación y repártelos (ver
    [Códigos de acceso](#códigos-de-acceso-registro-cerrado)).
@@ -55,8 +57,8 @@ Auth y RLS).
    invitación** (ver
    [Códigos de acceso](#códigos-de-acceso-registro-cerrado)). La cuenta se crea
    ya confirmada, sin correo de verificación, y la sesión queda iniciada.
-3. **Dashboard** (`/dashboard`): edita tu perfil público, publica huecos con el
-   calendario y consulta tus huecos y reuniones. El proxy exige sesión en el
+3. **Dashboard** (`/dashboard`): pinta tu disponibilidad en la cuadrícula,
+   edita tu perfil público y consulta tus reuniones. El proxy exige sesión en el
    resto de rutas de la app.
 4. **Directorio** (`/directorio`): perfiles de los asistentes con buscador y
    filtro por tipo (`indie` / `publisher`). Requiere sesión: RLS no expone
@@ -65,6 +67,30 @@ Auth y RLS).
    libre. Al confirmar la reserva se puede entrar directamente a la
    videollamada integrada (JaaS); en el dashboard, cada reunión tiene su propio
    botón **Entrar a la videollamada**.
+
+## Disponibilidad, onboarding y límite de reuniones
+
+- **Cuadrícula de disponibilidad** (`src/components/AvailabilityGrid.tsx`): tres
+  columnas (15, 16 y 17 de enero) por bloques de 30 minutos, de 09:00 a 18:00.
+  Se pinta arrastrando el ratón (`onMouseDown` decide si el gesto suma o quita,
+  `onMouseEnter` lo repite y `onMouseUp` lo cierra); también funciona con
+  teclado (Enter/Espacio). Los bloques reservados se muestran en verde y no se
+  pueden tocar.
+- **Guardado por sincronización**: `PUT /api/availability` recibe el conjunto
+  completo de bloques pintados, inserta en bloque los nuevos y borra los que ya
+  no están (nunca los reservados). Así "desmarcar" equivale a borrar la fila en
+  `availability`.
+- **Onboarding**: mientras el usuario no tenga ningún hueco guardado, el
+  dashboard muestra un banner con el paso 1 (definir disponibilidad) que se
+  puede cerrar.
+- **Límite anti-spam**: nadie puede tener más de **3 reuniones** en el evento.
+  La API responde `403` con el mensaje amigable y `book_availability` lo vuelve
+  a comprobar con un candado por usuario, de modo que dos reservas simultáneas
+  no pueden superar el tope. La constante vive en `src/lib/meetings.ts` y el
+  número también aparece en `0004_meeting_limit.sql`.
+- **Huecos antiguos**: los creados con la vista anterior (45 o 60 minutos, otros
+  horarios) no encajan en la cuadrícula; se listan debajo con su botón
+  **Borrar**.
 
 ## Landing pública y metadatos
 
@@ -184,10 +210,11 @@ bruta mete rate limiting en el proxy o en el edge de tu hosting.
 | Método y ruta | Descripción |
 | --- | --- |
 | `GET /api/availability?userId=<uuid>` | Huecos futuros y libres de un perfil (público). Sin `userId`, los del usuario autenticado. |
-| `POST /api/availability` | Publica huecos (`{ slots: [{ start_time, end_time }] }`, máx. 50). |
+| `POST /api/availability` | Publica huecos (`{ slots: [{ start_time, end_time }] }`, máx. 50) sin borrar los existentes. |
+| `PUT /api/availability` | Sincroniza la cuadrícula: recibe el conjunto completo de bloques, inserta los nuevos y borra los desmarcados (máx. 200). Devuelve `{ inserted, deleted }`. |
 | `DELETE /api/availability?id=<uuid>` | Borra un hueco propio que aún no esté reservado. |
 | `GET /api/meetings` | Reuniones del usuario con el nombre del otro participante. |
-| `POST /api/meetings` | Reserva un hueco (`{ availability_id }`) llamando a la función `book_availability`. |
+| `POST /api/meetings` | Reserva un hueco (`{ availability_id }`) llamando a la función `book_availability`. `403` con `reason: "meeting_limit"` al llegar a 3 reuniones. |
 | `POST /api/jitsi-token` | Firma un JWT de JaaS (`{ roomName, userName? }`) para entrar en la sala de una reunión propia. |
 | `POST /api/auth/register-with-code` | Registro con código (`{ name, email, password, type, code }`): `201 { user, session }`, `403 reason: "invalid_code"`, `409 reason: "code_used" \| "email_taken"`, `503` si falta `SUPABASE_SERVICE_ROLE_KEY`. Consume el código de forma atómica. |
 | `GET /auth/callback` | Intercambia el código PKCE por una sesión (enlaces de Supabase Auth; el registro ya no lo usa). |
@@ -246,6 +273,12 @@ servidor.
   `SECURITY DEFINER` que marca el hueco con un `UPDATE ... WHERE is_booked =
   false AND start_time > now() RETURNING *`. Si dos personas reservan a la vez,
   la segunda recibe `slot_unavailable` (HTTP 409).
+- **Tope de 3 reuniones**: `book_availability` (versión de
+  `0004_meeting_limit.sql`) cuenta las reuniones del usuario y lanza
+  `meeting_limit_reached` si ya tiene 3; el `pg_advisory_xact_lock` por usuario
+  serializa sus reservas para que dos peticiones simultáneas no se cuelen. La
+  API traduce ese error a un `403` con el mensaje amigable, y el dashboard avisa
+  al llegar al tope.
 - **Acceso cerrado desde el proxy**: `src/proxy.ts` (el "middleware" de Next 16
   se llama `proxy.ts` y exporta `proxy`) refresca la sesión y redirige a
   `/login?redirectedFrom=…` cualquier ruta sin sesión. Quedan abiertas `/login`,

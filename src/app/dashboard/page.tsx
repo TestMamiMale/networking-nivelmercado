@@ -1,14 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { User } from "@supabase/supabase-js";
 import { format, parseISO } from "date-fns";
 import { es } from "date-fns/locale";
-import BookingCalendar from "@/components/BookingCalendar";
+import { Sparkles, X } from "lucide-react";
+import AvailabilityGrid from "@/components/AvailabilityGrid";
 import MeetingRoom from "@/components/MeetingRoom";
 import ProfileEditor from "@/components/ProfileEditor";
+import { durationLabel } from "@/lib/availability-grid";
+import { MAX_MEETINGS_PER_USER, MEETING_LIMIT_MESSAGE } from "@/lib/meetings";
+import { EVENT } from "@/lib/site";
 import { createClient } from "@/lib/supabase";
 import type { AvailabilitySlot } from "@/types";
 
@@ -20,8 +24,6 @@ interface MeetingSummary {
   other_participant_name: string;
 }
 
-const DURATION_OPTIONS = [15, 30, 45, 60];
-
 export default function DashboardPage() {
   const router = useRouter();
 
@@ -30,13 +32,7 @@ export default function DashboardPage() {
   const [availability, setAvailability] = useState<AvailabilitySlot[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  // Gestión de disponibilidad
-  const [selectedDay, setSelectedDay] = useState<string | null>(null);
-  const [startTime, setStartTime] = useState("10:00");
-  const [durationMinutes, setDurationMinutes] = useState(30);
-  const [isSaving, setIsSaving] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [showGuide, setShowGuide] = useState(true);
 
   const loadData = useCallback(async () => {
     const [meetingsResponse, availabilityResponse] = await Promise.all([
@@ -115,89 +111,6 @@ export default function DashboardPage() {
     };
   }, [router]);
 
-  const mappedAvailabilitySlots = useMemo(
-    () =>
-      availability.reduce<Record<string, string[]>>((acc, slot) => {
-        const dateKey = format(parseISO(slot.start_time), "yyyy-MM-dd");
-        (acc[dateKey] ??= []).push(format(parseISO(slot.start_time), "HH:mm"));
-        return acc;
-      }, {}),
-    [availability],
-  );
-
-  const handleSelectDateForAvailability = (date: Date) => {
-    setSelectedDay(format(date, "yyyy-MM-dd"));
-    setNotice(null);
-  };
-
-  const publishSlot = async () => {
-    if (!selectedDay) return;
-
-    const start = new Date(`${selectedDay}T${startTime}:00`);
-
-    if (Number.isNaN(start.getTime())) {
-      setNotice("La hora indicada no es válida.");
-      return;
-    }
-
-    const end = new Date(start.getTime() + durationMinutes * 60_000);
-
-    setIsSaving(true);
-    setNotice(null);
-
-    try {
-      const response = await fetch("/api/availability", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          slots: [
-            { start_time: start.toISOString(), end_time: end.toISOString() },
-          ],
-        }),
-      });
-
-      const payload = (await response.json()) as { error?: string };
-
-      if (!response.ok) {
-        throw new Error(payload.error ?? "No se pudo publicar el hueco.");
-      }
-
-      setNotice(`Hueco publicado: ${format(start, "PPPp", { locale: es })}`);
-      await loadData();
-    } catch (publishError) {
-      setNotice(
-        publishError instanceof Error
-          ? publishError.message
-          : "Error desconocido.",
-      );
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const deleteSlot = async (slotId: string) => {
-    setNotice(null);
-
-    try {
-      const response = await fetch(`/api/availability?id=${slotId}`, {
-        method: "DELETE",
-      });
-      const payload = (await response.json()) as { error?: string };
-
-      if (!response.ok) {
-        throw new Error(payload.error ?? "No se pudo borrar el hueco.");
-      }
-
-      await loadData();
-    } catch (deleteError) {
-      setNotice(
-        deleteError instanceof Error
-          ? deleteError.message
-          : "Error desconocido.",
-      );
-    }
-  };
-
   const handleSignOut = async () => {
     await createClient().auth.signOut();
     router.replace("/login");
@@ -210,6 +123,24 @@ export default function DashboardPage() {
       </div>
     );
   }
+
+  const openSlots = availability.filter((slot) => !slot.is_booked);
+
+  const openMinutes = openSlots.reduce(
+    (total, slot) =>
+      total +
+      Math.max(
+        0,
+        (new Date(slot.end_time).getTime() -
+          new Date(slot.start_time).getTime()) /
+          60_000,
+      ),
+    0,
+  );
+
+  // Onboarding: solo mientras no haya ningún bloque guardado.
+  const showOnboarding = showGuide && !error && availability.length === 0;
+  const reachedMeetingLimit = meetings.length >= MAX_MEETINGS_PER_USER;
 
   return (
     <div className="container mx-auto px-4 py-8">
@@ -250,180 +181,118 @@ export default function DashboardPage() {
         </p>
       )}
 
-      <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
-        <section>
-          <h2 className="mb-4 text-2xl font-semibold text-zinc-950 dark:text-zinc-50">
-            Mis Reuniones
-          </h2>
+      {showOnboarding && <OnboardingBanner onDismiss={() => setShowGuide(false)} />}
 
-          {meetings.length === 0 ? (
-            <p className="text-zinc-600 dark:text-zinc-400">
-              No tienes reuniones agendadas.{" "}
-              <Link href="/directorio" className="underline">
-                Explora el directorio
-              </Link>{" "}
-              para reservar una.
+      <section aria-labelledby="disponibilidad">
+        <div className="mb-4 flex flex-wrap items-end justify-between gap-2">
+          <div>
+            <p className="mb-1 text-xs font-semibold tracking-wide text-blue-600 uppercase dark:text-blue-400">
+              Paso 1
             </p>
-          ) : (
-            <ul className="space-y-4">
-              {meetings.map((meeting) => (
-                <li
-                  key={meeting.id}
-                  className="rounded-lg border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
-                >
-                  <p className="font-semibold text-zinc-950 dark:text-zinc-50">
-                    Reunión con {meeting.other_participant_name}
-                  </p>
-                  <p className="text-sm text-zinc-700 dark:text-zinc-300">
-                    {format(parseISO(meeting.start_time), "PPPp", {
-                      locale: es,
-                    })}{" "}
-                    – {format(parseISO(meeting.end_time), "p", { locale: es })}{" "}
-                    (hora local)
-                  </p>
-                  <MeetingRoom
-                    virtualLink={meeting.virtual_link}
-                    displayName={user?.user_metadata?.name as string | undefined}
-                  />
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-
-        <section>
-          <h2 className="mb-4 text-2xl font-semibold text-zinc-950 dark:text-zinc-50">
-            Definir mi Disponibilidad
-          </h2>
-          <p className="mb-4 text-zinc-600 dark:text-zinc-400">
-            Haz clic en un día y publica los huecos que quieras ofrecer.
-          </p>
-
-          <BookingCalendar
-            onSelectDate={handleSelectDateForAvailability}
-            availableSlots={mappedAvailabilitySlots}
-            allowEmptySelection
-            allowWeekends
-            selectedDate={selectedDay}
-          />
-
-          {selectedDay && (
-            <div className="mt-4 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
-              <p className="mb-3 text-sm font-semibold text-zinc-950 dark:text-zinc-50">
-                {format(parseISO(`${selectedDay}T00:00:00`), "PPPP", {
-                  locale: es,
-                })}
-              </p>
-
-              <div className="flex flex-wrap items-end gap-3">
-                <div>
-                  <label
-                    htmlFor="start-time"
-                    className="block text-xs font-medium text-zinc-600 dark:text-zinc-400"
-                  >
-                    Hora de inicio
-                  </label>
-                  <input
-                    id="start-time"
-                    type="time"
-                    value={startTime}
-                    onChange={(event) => setStartTime(event.target.value)}
-                    className="mt-1 rounded-md border border-zinc-300 p-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50"
-                  />
-                </div>
-
-                <div>
-                  <label
-                    htmlFor="duration"
-                    className="block text-xs font-medium text-zinc-600 dark:text-zinc-400"
-                  >
-                    Duración
-                  </label>
-                  <select
-                    id="duration"
-                    value={durationMinutes}
-                    onChange={(event) =>
-                      setDurationMinutes(Number(event.target.value))
-                    }
-                    className="mt-1 rounded-md border border-zinc-300 p-2 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50"
-                  >
-                    {DURATION_OPTIONS.map((minutes) => (
-                      <option key={minutes} value={minutes}>
-                        {minutes} min
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => void publishSlot()}
-                  disabled={isSaving}
-                  className="rounded-md bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {isSaving ? "Publicando..." : "Publicar hueco"}
-                </button>
-              </div>
-
-              {notice && (
-                <p className="mt-3 text-sm text-zinc-700 dark:text-zinc-300">
-                  {notice}
-                </p>
-              )}
-            </div>
-          )}
-
-          <div className="mt-6">
-            <h3 className="mb-2 text-sm font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
-              Huecos publicados
-            </h3>
-
-            {availability.length === 0 ? (
-              <p className="text-sm text-zinc-600 dark:text-zinc-400">
-                Todavía no has publicado nada. Sin huecos, nadie podrá reservar
-                contigo.
-              </p>
-            ) : (
-              <ul className="space-y-2">
-                {availability.map((slot) => (
-                  <li
-                    key={slot.id}
-                    className="flex items-center justify-between gap-3 rounded-md border border-zinc-200 px-3 py-2 text-sm dark:border-zinc-800"
-                  >
-                    <span className="text-zinc-700 dark:text-zinc-300">
-                      {format(parseISO(slot.start_time), "PPPp", { locale: es })}
-                      {slot.is_booked && (
-                        <span className="ml-2 rounded bg-green-100 px-2 py-0.5 text-xs text-green-800 dark:bg-green-900 dark:text-green-200">
-                          Reservado
-                        </span>
-                      )}
-                    </span>
-
-                    {!slot.is_booked && (
-                      <button
-                        type="button"
-                        onClick={() => void deleteSlot(slot.id)}
-                        className="text-red-600 hover:underline dark:text-red-400"
-                      >
-                        Borrar
-                      </button>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
+            <h2
+              id="disponibilidad"
+              className="text-2xl font-semibold text-zinc-950 dark:text-zinc-50"
+            >
+              Define tu disponibilidad
+            </h2>
+            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+              Bloques de 30 minutos, del {EVENT.datesLabel}, entre las 09:00 y
+              las 18:00. Solo lo que pintes se podrá reservar.
+            </p>
           </div>
-        </section>
-      </div>
+
+          <p className="rounded-full border border-zinc-200 px-3 py-1 text-sm text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
+            {openSlots.length} huecos · {durationLabel(openMinutes)}
+          </p>
+        </div>
+
+        <AvailabilityGrid slots={availability} onSaved={loadData} />
+      </section>
+
+      <section className="mt-12" aria-labelledby="reuniones">
+        <div className="mb-4 flex flex-wrap items-end justify-between gap-2">
+          <div>
+            <p className="mb-1 text-xs font-semibold tracking-wide text-blue-600 uppercase dark:text-blue-400">
+              Paso 2
+            </p>
+            <h2
+              id="reuniones"
+              className="text-2xl font-semibold text-zinc-950 dark:text-zinc-50"
+            >
+              Mis reuniones
+            </h2>
+            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+              Explora el{" "}
+              <Link href="/directorio" className="underline">
+                directorio
+              </Link>{" "}
+              y reserva un hueco libre. Máximo {MAX_MEETINGS_PER_USER} reuniones
+              por persona durante el evento.
+            </p>
+          </div>
+
+          <p className="rounded-full border border-zinc-200 px-3 py-1 text-sm text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
+            {meetings.length} de {MAX_MEETINGS_PER_USER}
+          </p>
+        </div>
+
+        {reachedMeetingLimit && (
+          <p className="mb-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+            {MEETING_LIMIT_MESSAGE}
+          </p>
+        )}
+
+        {meetings.length === 0 ? (
+          <p className="text-zinc-600 dark:text-zinc-400">
+            No tienes reuniones agendadas.{" "}
+            <Link href="/directorio" className="underline">
+              Explora el directorio
+            </Link>{" "}
+            para reservar una.
+          </p>
+        ) : (
+          <ul className="space-y-4">
+            {meetings.map((meeting) => (
+              <li
+                key={meeting.id}
+                className="rounded-lg border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
+              >
+                <p className="font-semibold text-zinc-950 dark:text-zinc-50">
+                  Reunión con {meeting.other_participant_name}
+                </p>
+                <p className="text-sm text-zinc-700 dark:text-zinc-300">
+                  {format(parseISO(meeting.start_time), "PPPp", {
+                    locale: es,
+                  })}{" "}
+                  – {format(parseISO(meeting.end_time), "p", { locale: es })}{" "}
+                  (hora local)
+                </p>
+                <MeetingRoom
+                  virtualLink={meeting.virtual_link}
+                  displayName={user?.user_metadata?.name as string | undefined}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
 
       {user && (
-        <section className="mt-12">
-          <h2 className="mb-2 text-2xl font-semibold text-zinc-950 dark:text-zinc-50">
-            Mi perfil público
-          </h2>
-          <p className="mb-4 text-sm text-zinc-600 dark:text-zinc-400">
-            Así te ven los demás participantes en el directorio.
-          </p>
+        <section className="mt-12" aria-labelledby="perfil">
+          <div className="mb-4">
+            <p className="mb-1 text-xs font-semibold tracking-wide text-blue-600 uppercase dark:text-blue-400">
+              Paso 3
+            </p>
+            <h2
+              id="perfil"
+              className="text-2xl font-semibold text-zinc-950 dark:text-zinc-50"
+            >
+              Mi perfil público
+            </h2>
+            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+              Así te ven los demás participantes en el directorio.
+            </p>
+          </div>
           <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-900">
             <ProfileEditor userId={user.id} />
           </div>
@@ -432,3 +301,41 @@ export default function DashboardPage() {
     </div>
   );
 }
+
+/**
+ * Guía de bienvenida. Solo se muestra mientras el usuario no tenga ningún
+ * bloque de disponibilidad guardado; se puede cerrar y no vuelve hasta la
+ * próxima visita (si sigue sin disponibilidad).
+ */
+function OnboardingBanner({ onDismiss }: { onDismiss: () => void }) {
+  return (
+    <div className="relative mb-6 overflow-hidden rounded-xl border border-blue-200 bg-gradient-to-br from-blue-50 via-white to-white p-5 pr-12 dark:border-blue-900 dark:from-blue-950/60 dark:via-zinc-900 dark:to-zinc-900">
+      <div
+        aria-hidden
+        className="absolute -top-12 -right-12 size-40 rounded-full bg-blue-500/10 blur-2xl"
+      />
+
+      <div className="relative flex gap-3">
+        <span className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-full bg-blue-600 text-white">
+          <Sparkles size={18} />
+        </span>
+
+        <p className="max-w-3xl text-sm leading-relaxed text-zinc-800 dark:text-zinc-200">
+          ¡Hola! Paso 1: Define tu disponibilidad. Pinta los bloques de 30
+          minutos que quieras ofrecer. Una vez guardes, tu perfil aparecerá en
+          el directorio para que otros te agenden.
+        </p>
+      </div>
+
+      <button
+        type="button"
+        onClick={onDismiss}
+        aria-label="Ocultar la guía"
+        className="absolute top-3 right-3 rounded-full p-1 text-zinc-500 transition-colors hover:bg-white hover:text-zinc-900 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+      >
+        <X size={16} />
+      </button>
+    </div>
+  );
+}
+

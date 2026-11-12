@@ -31,6 +31,14 @@ export interface AvailabilitySlot {
   is_booked?: boolean;
 }
 
+/** Respuesta de `PUT /api/availability` (sincronización de la cuadrícula). */
+export interface AvailabilitySyncResponse {
+  /** Bloques nuevos que se han insertado. */
+  inserted: number;
+  /** Bloques que se han borrado porque ya no estaban pintados. */
+  deleted: number;
+}
+
 export interface Meeting {
   id: string;
   start_time: string;

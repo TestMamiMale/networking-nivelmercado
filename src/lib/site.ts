@@ -39,6 +39,12 @@ export const EVENT = {
   tagline: "Conecta. Agenda. Juega.",
   datesLabel: "15 – 17 de enero de 2027",
   datesShortLabel: "15 – 17 ene",
+  /**
+   * Días del evento en formato `yyyy-MM-dd`, en orden. La cuadrícula de
+   * disponibilidad pinta una columna por día, así que las fechas se declaran
+   * aquí una sola vez.
+   */
+  days: ["2027-01-15", "2027-01-16", "2027-01-17"],
   description:
     "Tres días para conocer estudios indie y publishers, publicar cuándo estás disponible y agendar reuniones 1 a 1 durante el evento.",
 } as const;

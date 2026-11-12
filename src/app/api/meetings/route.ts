@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { buildMeetingLink } from "@/lib/jitsi";
+import { MAX_MEETINGS_PER_USER, MEETING_LIMIT_MESSAGE } from "@/lib/meetings";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -78,6 +79,9 @@ export async function GET() {
  * La reserva real la hace la función SQL `book_availability`, que marca el
  * hueco como reservado y crea la reunión en una sola transacción. Si dos
  * personas intentan el mismo hueco a la vez, solo una lo consigue (409).
+ *
+ * Límite anti-spam: un usuario no puede tener más de `MAX_MEETINGS_PER_USER`
+ * reuniones en el evento (403 con `reason: "meeting_limit"`).
  */
 export async function POST(request: NextRequest) {
   const body: unknown = await request.json().catch(() => null);
@@ -105,6 +109,29 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  // Límite anti-spam: nadie puede acumular más de 3 reuniones en el evento.
+  // Se comprueba también en `book_availability` (0004) para que dos reservas
+  // simultáneas no puedan saltarse el tope.
+  const { count, error: countError } = await supabase
+    .from("meetings")
+    .select("id", { count: "exact", head: true })
+    .or(`participant1_id.eq.${user.id},participant2_id.eq.${user.id}`);
+
+  if (countError) {
+    console.error("Error counting meetings:", countError);
+    return NextResponse.json(
+      { error: "No se pudo comprobar tu límite de reuniones." },
+      { status: 500 },
+    );
+  }
+
+  if ((count ?? 0) >= MAX_MEETINGS_PER_USER) {
+    return NextResponse.json(
+      { error: MEETING_LIMIT_MESSAGE, reason: "meeting_limit" },
+      { status: 403 },
+    );
+  }
+
   const virtualLink = buildMeetingLink();
 
   const { data: meetingId, error } = await supabase.rpc("book_availability", {
@@ -119,6 +146,13 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: "Ese horario ya no está disponible. Elige otro." },
         { status: 409 },
+      );
+    }
+
+    if (message.includes("meeting_limit_reached")) {
+      return NextResponse.json(
+        { error: MEETING_LIMIT_MESSAGE, reason: "meeting_limit" },
+        { status: 403 },
       );
     }
 
