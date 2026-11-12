@@ -63,10 +63,13 @@ Auth y RLS).
 4. **Directorio** (`/directorio`): perfiles de los asistentes con buscador y
    filtro por tipo (`indie` / `publisher`). Requiere sesión: RLS no expone
    `profiles` a la clave anónima.
-5. **Perfil** (`/perfil/[slug]`): ficha + calendario para reservar un hueco
-   libre. Al confirmar la reserva se puede entrar directamente a la
-   videollamada integrada (JaaS); en el dashboard, cada reunión tiene su propio
-   botón **Entrar a la videollamada**.
+5. **Perfil** (`/perfil/[slug]`): ficha + reserva de huecos. La sección de
+   agenda (`src/components/BookingSection.tsx`) lista solo los días con
+   disponibilidad como una fila de botones grandes y deslizable, con el primer
+   día preseleccionado en azul; debajo, los bloques de 30 minutos de ese día en
+   una cuadrícula de tres columnas. Al confirmar la reserva se puede entrar
+   directamente a la videollamada integrada (JaaS); en el dashboard, cada
+   reunión tiene su propio botón **Entrar a la videollamada**.
 
 ## Disponibilidad, onboarding y límite de reuniones
 
