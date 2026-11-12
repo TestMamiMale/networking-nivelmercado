@@ -11,15 +11,29 @@ import { getSupabaseEnv } from "@/lib/supabase/env";
  * (https://nextjs.org/docs/app/api-reference/file-conventions/proxy).
  *
  * Rutas públicas (sin sesión):
+ *   - `/`             → landing pública del evento (subdominio del sitio
+ *                       principal): explica el evento y lleva a /login.
  *   - `/login`        → formulario de acceso / registro.
  *   - `/auth/*`       → callback de confirmación de correo y recuperación.
  *   - `/api/*`        → los Route Handlers responden JSON con su propio 401
  *                       (redirigir un fetch a /login devolvería HTML).
- * Todo lo demás (`/`, `/dashboard`, `/directorio`, `/perfil/[slug]`, ...)
+ *   - `/opengraph-image`, `/twitter-image`, `/icon`, `/apple-icon`
+ *                     → imágenes de metadatos. Las piden los crawlers de
+ *                       WhatsApp, Discord o X **sin cookies**: si se
+ *                       redirigieran al login, la tarjeta al compartir el
+ *                       enlace saldría rota.
+ * Todo lo demás (`/dashboard`, `/directorio`, `/perfil/[slug]`, ...)
  * redirige a /login conservando el destino en `?redirectedFrom=`.
  */
 
-const PUBLIC_PATHS = new Set(["/login"]);
+const PUBLIC_PATHS = new Set([
+  "/",
+  "/login",
+  "/opengraph-image",
+  "/twitter-image",
+  "/icon",
+  "/apple-icon",
+]);
 
 function isPublicPath(pathname: string) {
   if (PUBLIC_PATHS.has(pathname)) return true;

@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import Navbar from "@/components/navbar";
+import { EVENT, SITE_NAME, SITE_TITLE, SITE_URL } from "@/lib/site";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -13,10 +14,42 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+/**
+ * Metadatos del sitio.
+ *
+ * La imagen para compartir (`og:image`) no se declara aquí: la genera
+ * `src/app/opengraph-image.tsx` y Next añade las etiquetas `og:image` y
+ * `twitter:image` con su URL absoluta (resuelta con `metadataBase`).
+ */
 export const metadata: Metadata = {
-  title: "Networking Games",
-  description:
-    "Conecta con estudios indie y publishers y agenda reuniones de networking durante el evento.",
+  metadataBase: new URL(SITE_URL),
+  title: {
+    default: SITE_TITLE,
+    template: `%s | ${SITE_NAME}`,
+  },
+  description: EVENT.description,
+  applicationName: SITE_NAME,
+  keywords: [
+    "networking",
+    "videojuegos",
+    "estudios indie",
+    "publishers",
+    "evento",
+    "reuniones 1 a 1",
+  ],
+  openGraph: {
+    type: "website",
+    locale: "es_CL",
+    url: "/",
+    siteName: SITE_TITLE,
+    title: SITE_TITLE,
+    description: EVENT.description,
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: SITE_TITLE,
+    description: EVENT.description,
+  },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

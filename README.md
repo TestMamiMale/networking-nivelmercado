@@ -48,25 +48,46 @@ Auth y RLS).
 
 ## Flujo de uso
 
-1. **Registro** en `/login` con **nombre, email, contraseña, tipo y código de
+1. **Landing** (`/`): página pública del evento (fecha, "Cómo funciona" y
+   llamada a la acción). Es la única vista de la app que se sirve sin sesión, así
+   que se puede compartir por WhatsApp o Discord: lleva su tarjeta Open Graph.
+2. **Registro** en `/login` con **nombre, email, contraseña, tipo y código de
    invitación** (ver
    [Códigos de acceso](#códigos-de-acceso-registro-cerrado)). La cuenta se crea
    ya confirmada, sin correo de verificación, y la sesión queda iniciada.
-2. **Dashboard** (`/dashboard`): edita tu perfil público, publica huecos con el
-   calendario y consulta tus huecos y reuniones. El proxy exige sesión en todas
-   las rutas de la app.
-3. **Directorio** (`/directorio`): perfiles de los asistentes con buscador y
+3. **Dashboard** (`/dashboard`): edita tu perfil público, publica huecos con el
+   calendario y consulta tus huecos y reuniones. El proxy exige sesión en el
+   resto de rutas de la app.
+4. **Directorio** (`/directorio`): perfiles de los asistentes con buscador y
    filtro por tipo (`indie` / `publisher`). Requiere sesión: RLS no expone
    `profiles` a la clave anónima.
-4. **Perfil** (`/perfil/[slug]`): ficha + calendario para reservar un hueco
+5. **Perfil** (`/perfil/[slug]`): ficha + calendario para reservar un hueco
    libre. Al confirmar la reserva se puede entrar directamente a la
    videollamada integrada (JaaS); en el dashboard, cada reunión tiene su propio
    botón **Entrar a la videollamada**.
 
+## Landing pública y metadatos
+
+`/` es la página que se comparte como `networking.nivelmercado.cl`: hero con la
+fecha del evento (15–17 de enero de 2027), sección "Cómo funciona" y pie con el
+enlace a [Nivel Mercado](https://nivelmercado.cl). El botón principal lleva a
+`/login`, o a `/dashboard` si ya hay sesión: el resto de la página se
+prerenderiza y solo ese botón se resuelve en cada petición.
+
+- Textos y fechas del evento: `src/lib/site.ts`.
+- La tarjeta de Open Graph se genera en el build con
+  `src/app/opengraph-image.tsx` (PNG 1200×630), así que no hay que subir ninguna
+  imagen al repositorio. Si la URL del proxy la bloqueara, los crawlers no
+  podrían leerla: `/opengraph-image` está en las rutas públicas.
+- `NEXT_PUBLIC_SITE_URL` fija el dominio de los enlaces absolutos de los
+  metadatos. Si no se define, se asume `https://networking.nivelmercado.cl`.
+
 ## Códigos de acceso (registro cerrado)
 
-La app es cerrada: el proxy exige sesión en **todas** las rutas salvo `/login`,
-`/auth/*` y `/api/*`, y RLS solo deja leer `profiles` a usuarios autenticados.
+La app es cerrada: el proxy exige sesión en **todas** las rutas salvo la landing
+pública (`/`), `/login`, `/auth/*`, `/api/*` y las imágenes de metadatos
+(`/opengraph-image`, `/icon`…), que los crawlers piden sin cookies. RLS solo deja
+leer `profiles` a usuarios autenticados.
 Para registrarse hace falta un **código de invitación** de la tabla
 `public.access_codes`. Cada código vale para **un solo registro** y sirve con el
 correo que la persona prefiera: ya no hay una lista de emails invitados.
